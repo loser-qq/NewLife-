@@ -48,9 +48,10 @@ const client = new Client({
   ],
 });
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const DEVELOPER_ID = process.env.DEVELOPER_ID;
+const TOKEN = process.env.DISCORD_TOKEN || process.env.UNIFIED_DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID || process.env.UNIFIED_CLIENT_ID;
+const DEVELOPER_ID = process.env.DEVELOPER_ID || process.env.UNIFIED_DEVELOPER_ID;
+const GUILD_ID = process.env.GUILD_ID || process.env.UNIFIED_GUILD_ID;
 const repinningChannels = new Set();
 const STATUS_REFRESH_INTERVAL_MS = 60 * 1000;
 const STATUS_MEMBER_SYNC_COOLDOWN_MS = 30 * 60 * 1000;
@@ -501,7 +502,7 @@ async function findRecentAuditEntry(guild, type, targetId) {
 }
 
 const SHARED_APP_MODE = process.env.ONE_TOKEN_MODE === 'true';
-const COMMUNITY_BLOCKED_COMMANDS_IN_SHARED_MODE = new Set(['status', 'コマンド一覧', 'bot情報']);
+const COMMUNITY_BLOCKED_COMMANDS_IN_SHARED_MODE = new Set(['コマンド一覧', 'bot情報']);
 
 const commands = [
   new SlashCommandBuilder()
@@ -708,6 +709,22 @@ async function registerCommands() {
     for (const command of commands) {
       await rest.post(Routes.applicationCommands(CLIENT_ID), { body: command });
     }
+
+    const statusCommand = commands.find((command) => command.name === 'status');
+    if (GUILD_ID && statusCommand) {
+      const guildCommands = await rest.get(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID));
+      const existingStatusCommand = guildCommands.find((command) => command.name === 'status');
+      if (existingStatusCommand) {
+        await rest.patch(
+          Routes.applicationGuildCommand(CLIENT_ID, GUILD_ID, existingStatusCommand.id),
+          { body: statusCommand },
+        );
+      } else {
+        await rest.post(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: statusCommand });
+      }
+      console.log(`ギルドコマンドを登録しました: /status (${GUILD_ID})`);
+    }
+
     console.log('スラッシュコマンドの登録が完了しました');
   } catch (error) {
     console.error('コマンド登録エラー:', error);

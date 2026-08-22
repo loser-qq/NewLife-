@@ -20,6 +20,9 @@ try {
   }
 }
 
+const fs = require('fs');
+const path = require('path');
+
 process.on('uncaughtException', (err) => {
   process.stdout.write('[FATAL] uncaughtException: ' + err.message + '\n' + err.stack + '\n');
   process.exit(1);
@@ -53,17 +56,37 @@ const {
 } = require('discord.js');
 
 const db = require('./database.js');
-const communityDb = require('../community/database.js');
 
-function requireGachaModule(moduleName) {
+function requireCommunityDb() {
   try {
-    return require(`./data/${moduleName}`);
+    return require('../community/database.js');
   } catch (error) {
     if (error && error.code !== 'MODULE_NOT_FOUND') {
       throw error;
     }
-    return require(`./${moduleName}`);
+    return require('./features/community/database.js');
   }
+}
+
+const communityDb = requireCommunityDb();
+
+function requireGachaModule(moduleName) {
+  const candidatePaths = [
+    path.join(__dirname, 'data', moduleName),
+    path.join(__dirname, 'features', 'economy', 'data', moduleName),
+    path.join(process.cwd(), 'features', 'economy', 'data', moduleName),
+    path.join(process.cwd(), 'data', moduleName),
+    path.join(__dirname, moduleName),
+    path.join(process.cwd(), moduleName),
+  ];
+
+  for (const filePath of candidatePaths) {
+    if (fs.existsSync(filePath)) {
+      return require(filePath);
+    }
+  }
+
+  throw new Error(`gacha module not found: ${moduleName}`);
 }
 
 const { gachaCommandBuilders, isGachaCommandName, handleGachaCommand } = requireGachaModule('gacha.js');
@@ -77,9 +100,9 @@ const client = new Client({
   ],
 });
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const DEVELOPER_ID = process.env.DEVELOPER_ID;
+const TOKEN = process.env.DISCORD_TOKEN || process.env.UNIFIED_DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID || process.env.UNIFIED_CLIENT_ID;
+const DEVELOPER_ID = process.env.DEVELOPER_ID || process.env.UNIFIED_DEVELOPER_ID;
 
 if (!TOKEN || !CLIENT_ID) {
   process.stdout.write('[STARTUP] DISCORD_TOKEN or CLIENT_ID is missing\n');
