@@ -424,12 +424,8 @@ function buildStatusEmbed(guild) {
           .join('\n') || '未設定',
         inline: true,
       },
-      { name: '自販機パネル数', value: `${vendingPanels.length}件`, inline: true },
-      { name: '自販機商品数', value: `${totalVendingProducts}件`, inline: true },
-      { name: '自販機ログ設定', value: `${vendingLogCount}件`, inline: true },
-      { name: 'VC自販機パネル数', value: `${vcVendingPanels.length}件`, inline: true },
-      { name: 'VC自販機商品数', value: `${totalVcVendingProducts}件`, inline: true },
-      { name: 'VC自販機ログ設定', value: `${vcVendingLogCount}件`, inline: true },
+      { name: '自販機', value: `パネル: ${vendingPanels.length}件\n商品: ${totalVendingProducts}件\nログ設定: ${vendingLogCount}件`, inline: true },
+      { name: 'VC自販機', value: `パネル: ${vcVendingPanels.length}件\n商品: ${totalVcVendingProducts}件\nログ設定: ${vcVendingLogCount}件`, inline: true },
       { name: 'ロール別VC時間報酬', value: roleVoiceTimeRewardSummary, inline: false },
     )
     .setTimestamp();
@@ -696,7 +692,7 @@ function buildLevelingProfileEmbed(targetMember, guild) {
     .setTimestamp();
 }
 
-function buildLevelingInfoEmbed(targetMember, guild) {
+function buildLevelingInfoEmbed(targetMember, guild, options = {}) {
   const now = Date.now();
   const totalSeconds = getEffectiveLevelingSeconds(targetMember.id, guild.id, now);
   const state = calculateLevelingState(guild.id, totalSeconds);
@@ -749,19 +745,24 @@ function buildLevelingInfoEmbed(targetMember, guild) {
     extraFields.push({ name: 'ロール', value: roleMentions.length > 0 ? roleMentions.join(' ') : 'なし', inline: false });
   }
 
+  const fields = [
+    { name: '現在レベル', value: `Lv${state.level}`, inline: true },
+    { name: '次のレベルまで', value: state.remainingToNext > 0 ? formatDuration(state.remainingToNext) : '到達済み', inline: true },
+    { name: 'VC参加時間', value: formatDuration(totalSeconds), inline: true },
+    { name: '対応ロール', value: range ? `<@&${range.role_id}>` : '未設定', inline: true },
+    { name: 'VC参加中', value: session ? 'はい' : 'いいえ', inline: true },
+    ...extraFields,
+  ];
+
+  if (options.showBalance !== false) {
+    fields.unshift({ name: '残高', value: `${balance.toLocaleString()} ${unit}`, inline: true });
+  }
+
   return new EmbedBuilder()
     .setTitle('📌 ユーザー情報')
     .setColor(0x5865f2)
     .setDescription(`対象: <@${targetMember.id}>`)
-    .addFields(
-      { name: '残高', value: `${balance.toLocaleString()} ${unit}`, inline: true },
-      { name: '現在レベル', value: `Lv${state.level}`, inline: true },
-      { name: '次のレベルまで', value: state.remainingToNext > 0 ? formatDuration(state.remainingToNext) : '到達済み', inline: true },
-      { name: 'VC参加時間', value: formatDuration(totalSeconds), inline: true },
-      { name: '対応ロール', value: range ? `<@&${range.role_id}>` : '未設定', inline: true },
-      { name: 'VC参加中', value: session ? 'はい' : 'いいえ', inline: true },
-      ...extraFields,
-    )
+    .addFields(fields)
     .setTimestamp();
 }
 
@@ -3670,7 +3671,7 @@ client.on('interactionCreate', async interaction => {
 
     if (commandName === '自分') {
       const hidden = interaction.options.getString('表示') !== 'public';
-      const embed = buildLevelingInfoEmbed(member, guild);
+      const embed = buildLevelingInfoEmbed(member, guild, { showBalance: false });
       await interaction.reply(hidden ? { embeds: [embed], flags: MessageFlags.Ephemeral } : { embeds: [embed] });
       return;
     }
@@ -4075,54 +4076,64 @@ client.on('interactionCreate', async interaction => {
       const ch = (id) => (id ? `<#${id}>` : none);
       const settings = db.getSettings(guild.id);
       const unit = settings.currency_unit || 'コイン';
+      const section = commandName.replace('設定状況', '');
 
       // 経済設定 embed
-      const economyEmbed = buildStatusEmbed(guild);
-      economyEmbed.setTitle('💰 経済設定状況');
+      let economyEmbed;
+      if (section === 'economy') {
+        economyEmbed = buildStatusEmbed(guild);
+        economyEmbed.setTitle('💰 経済設定状況');
+      }
 
       // コミュニティ設定 embed
-      const vcTransferCount = communityDb.getAllVcTransfers(guild.id).length;
-      const ticketPanelCount = communityDb.getAllTicketPanels(guild.id).length;
-      const rrMessageCount = communityDb.getAllReactionRoleMessages(guild.id).length;
-      const inquiryForumCount = communityDb.getInquiryForumItems(guild.id).length;
-      const messageLinkPreview = settings.message_link_preview_enabled !== 0 ? 'オン' : 'オフ';
-      const communityEmbed = new EmbedBuilder()
-        .setTitle('🎙 コミュニティ設定状況')
-        .setColor(0x57f287)
-        .setDescription(`サーバー: **${guild.name}**`)
-        .addFields(
-          { name: '📥 入室ログ', value: ch(settings.join_log_channel_id), inline: true },
-          { name: '📤 退出ログ', value: ch(settings.leave_log_channel_id), inline: true },
-          { name: '💬 メッセージリンク自動表示', value: messageLinkPreview, inline: true },
-          { name: '🔊 VC転送設定数', value: `${vcTransferCount}件`, inline: true },
-          { name: '🎫 チケットパネル数', value: `${ticketPanelCount}件`, inline: true },
-          { name: '📩 お問い合わせ受付数', value: `${inquiryForumCount}件`, inline: true },
-          { name: '🎭 RRメッセージ数', value: `${rrMessageCount}件`, inline: true },
-        )
-        .setTimestamp();
+      let communityEmbed;
+      if (section === 'community') {
+        const vcTransferCount = communityDb.getAllVcTransfers(guild.id).length;
+        const ticketPanelCount = communityDb.getAllTicketPanels(guild.id).length;
+        const rrMessageCount = communityDb.getAllReactionRoleMessages(guild.id).length;
+        const inquiryForumCount = communityDb.getInquiryForumItems(guild.id).length;
+        const messageLinkPreview = settings.message_link_preview_enabled !== 0 ? 'オン' : 'オフ';
+        communityEmbed = new EmbedBuilder()
+          .setTitle('🎙 コミュニティ設定状況')
+          .setColor(0x57f287)
+          .setDescription(`サーバー: **${guild.name}**`)
+          .addFields(
+            { name: '📥 入室ログ', value: ch(settings.join_log_channel_id), inline: true },
+            { name: '📤 退出ログ', value: ch(settings.leave_log_channel_id), inline: true },
+            { name: '💬 メッセージリンク自動表示', value: messageLinkPreview, inline: true },
+            { name: '🔊 VC転送設定数', value: `${vcTransferCount}件`, inline: true },
+            { name: '🎫 チケットパネル数', value: `${ticketPanelCount}件`, inline: true },
+            { name: '📩 お問い合わせ受付数', value: `${inquiryForumCount}件`, inline: true },
+            { name: '🎭 RRメッセージ数', value: `${rrMessageCount}件`, inline: true },
+          )
+          .setTimestamp();
+      }
 
       // セキュリティ設定 embed
-      const secConfig = db.getAppStateJson('security', 'config') || {};
-      const secEmbed = new EmbedBuilder()
-        .setTitle('🛡 セキュリティ設定状況')
-        .setColor(0xed4245)
-        .setDescription(`サーバー: **${guild.name}**`)
-        .addFields(
-          { name: 'スパム判定', value: secConfig.spamProtectionEnabled !== false ? '有効' : '無効', inline: true },
-          { name: 'レイド判定', value: secConfig.raidProtectionEnabled !== false ? '有効' : '無効', inline: true },
-          { name: '画像スパム判定', value: secConfig.imageSpamDetectionEnabled !== false ? '有効' : '無効', inline: true },
-          { name: 'スパムしきい値', value: String(secConfig.spamThreshold ?? 6), inline: true },
-          { name: 'スパム窓', value: `${secConfig.spamWindowMs ?? 8000}ms`, inline: true },
-          { name: 'レイドしきい値', value: String(secConfig.raidJoinThreshold ?? 8), inline: true },
-          { name: 'レイド窓', value: `${secConfig.raidWindowMs ?? 20000}ms`, inline: true },
-          { name: 'タイムアウト時間', value: `${secConfig.timeoutDurationMinutes ?? 10}分`, inline: true },
-          { name: '外部アプリ制限', value: secConfig.blockExternalApps ? '有効' : '無効', inline: true },
-          { name: 'モデレーションログ', value: secConfig.moderationLogChannelId ? `<#${secConfig.moderationLogChannelId}>` : none, inline: true },
-          { name: '招待ログ', value: secConfig.inviteLogChannelId ? `<#${secConfig.inviteLogChannelId}>` : none, inline: true },
-          { name: '招待パネル設置先', value: secConfig.invitePanelChannelId ? `<#${secConfig.invitePanelChannelId}>` : none, inline: true },
-          { name: 'モデレーター役職', value: secConfig.modRoleId ? `<@&${secConfig.modRoleId}>` : none, inline: true },
-        )
-        .setTimestamp();
+      let secEmbed;
+      if (section === 'security') {
+        const secConfig = db.getAppStateJson('security', 'config') || {};
+        secEmbed = new EmbedBuilder()
+          .setTitle('🛡 セキュリティ設定状況')
+          .setColor(0xed4245)
+          .setDescription(`サーバー: **${guild.name}**`)
+          .addFields(
+            { name: 'スパム判定', value: secConfig.spamProtectionEnabled !== false ? '有効' : '無効', inline: true },
+            { name: 'レイド判定', value: secConfig.raidProtectionEnabled !== false ? '有効' : '無効', inline: true },
+            { name: '画像スパム判定', value: secConfig.imageSpamDetectionEnabled !== false ? '有効' : '無効', inline: true },
+            { name: 'スパムしきい値', value: String(secConfig.spamThreshold ?? 6), inline: true },
+            { name: 'スパム窓', value: `${secConfig.spamWindowMs ?? 8000}ms`, inline: true },
+            { name: 'レイドしきい値', value: String(secConfig.raidJoinThreshold ?? 8), inline: true },
+            { name: 'レイド窓', value: `${secConfig.raidWindowMs ?? 20000}ms`, inline: true },
+            { name: 'タイムアウト時間', value: `${secConfig.timeoutDurationMinutes ?? 10}分`, inline: true },
+            { name: '外部アプリ制限', value: secConfig.blockExternalApps ? '有効' : '無効', inline: true },
+            { name: 'モデレーションログ', value: secConfig.moderationLogChannelId ? `<#${secConfig.moderationLogChannelId}>` : none, inline: true },
+            { name: '招待ログ', value: secConfig.inviteLogChannelId ? `<#${secConfig.inviteLogChannelId}>` : none, inline: true },
+            { name: '招待パネル設置先', value: secConfig.invitePanelChannelId ? `<#${secConfig.invitePanelChannelId}>` : none, inline: true },
+            { name: 'モデレーター役職', value: secConfig.modRoleId ? `<@&${secConfig.modRoleId}>` : none, inline: true },
+          )
+          .setTimestamp();
+      }
 
       const communityDetailEmbeds = [];
       const economyDetailEmbeds = [];
@@ -4134,18 +4145,20 @@ client.on('interactionCreate', async interaction => {
           target.push(new EmbedBuilder().setTitle(title).setColor(color).addFields(fields.slice(index, index + 25)));
         }
       };
-      const ticketPanels = communityDb.getAllTicketPanels(guild.id);
-      const ticketFields = ticketPanels.map((panel) => ({
-        name: `チケット: ${panel.title}`,
-        value: [
-          `カテゴリ: ${ch(panel.category_id)}`,
-          `ログ先: ${ch(panel.log_channel_id)}`,
-          `サポートロール: ${[panel.role1_id, panel.role2_id, panel.role3_id].filter(Boolean).map((id) => `<@&${id}>`).join(', ') || none}`,
-        ].join('\n'),
-        inline: true,
-      }));
-      if (ticketFields.length > 0) {
-        addDetailEmbeds('🎫 チケットパネル設定', 0xfee75c, ticketFields);
+      if (section === 'community') {
+        const ticketPanels = communityDb.getAllTicketPanels(guild.id);
+        const ticketFields = ticketPanels.map((panel) => ({
+          name: `チケット: ${panel.title}`,
+          value: [
+            `カテゴリ: ${ch(panel.category_id)}`,
+            `ログ先: ${ch(panel.log_channel_id)}`,
+            `サポートロール: ${[panel.role1_id, panel.role2_id, panel.role3_id].filter(Boolean).map((id) => `<@&${id}>`).join(', ') || none}`,
+          ].join('\n'),
+          inline: true,
+        }));
+        if (ticketFields.length > 0) {
+          addDetailEmbeds('🎫 チケットパネル設定', 0xfee75c, ticketFields);
+        }
       }
 
       const panelFields = (panels, label) => panels.map((panel) => ({
@@ -4158,44 +4171,46 @@ client.on('interactionCreate', async interaction => {
         ].join('\n'),
         inline: true,
       }));
-      const vendingPanels = db.getVendingPanels(guild.id);
-      const vcVendingPanels = db.getVcVendingPanels(guild.id);
-      if (vendingPanels.length > 0) {
-        addDetailEmbeds('🛒 自販機パネル設定', 0xf1c40f, panelFields(vendingPanels, '自販機'));
-      }
-      if (vcVendingPanels.length > 0) {
-        addDetailEmbeds('🛒 VC自販機パネル設定', 0xf1c40f, panelFields(vcVendingPanels, 'VC自販機'));
-      }
+      if (section === 'economy') {
+        const vendingPanels = db.getVendingPanels(guild.id);
+        const vcVendingPanels = db.getVcVendingPanels(guild.id);
+        if (vendingPanels.length > 0) {
+          addDetailEmbeds('🛒 自販機パネル設定', 0xf1c40f, panelFields(vendingPanels, '自販機'));
+        }
+        if (vcVendingPanels.length > 0) {
+          addDetailEmbeds('🛒 VC自販機パネル設定', 0xf1c40f, panelFields(vcVendingPanels, 'VC自販機'));
+        }
 
-      const bankPanelFields = db.getBankPanels(guild.id).map((panel) => ({
-        name: `bankパネル: ${panel.title || none}`,
-        value: `設置先: ${ch(panel.channel_id)}\nメッセージID: ${panel.message_id || none}`,
-        inline: true,
-      }));
-      if (bankPanelFields.length > 0) {
-        addDetailEmbeds('🏦 bankパネル設定', 0x2ecc71, bankPanelFields);
-      }
+        const bankPanelFields = db.getBankPanels(guild.id).map((panel) => ({
+          name: `bankパネル: ${panel.title || none}`,
+          value: `設置先: ${ch(panel.channel_id)}\nメッセージID: ${panel.message_id || none}`,
+          inline: true,
+        }));
+        if (bankPanelFields.length > 0) {
+          addDetailEmbeds('🏦 bankパネル設定', 0x2ecc71, bankPanelFields);
+        }
 
-      const gachaFields = [
-        ...db.getGachaPanels(guild.id).map((panel) => ({
-          name: `旧ガチャ: ${panel.panel_key}`,
-          value: `設置先: ${ch(panel.channel_id)}\nメッセージID: ${panel.message_id || none}\nタイトル: ${panel.title || none}`,
-          inline: true,
-        })),
-        ...db.getBoxGachaSettings(guild.id).map((gacha) => ({
-          name: `ガチャ: ${gacha.gacha_key}`,
-          value: [
-            `ガチャ名: ${gacha.name || none}`,
-            `設置先: ${ch(gacha.channel_id)}`,
-            `メッセージID: ${gacha.message_id || none}`,
-            `ログ先: ${ch(gacha.log_channel_id)}`,
-            `価格: 1回 ${gacha.single_price ?? 0} / 10連 ${gacha.ten_price ?? 0}`,
-          ].join('\n'),
-          inline: true,
-        })),
-      ];
-      if (gachaFields.length > 0) {
-        addDetailEmbeds('🎰 ガチャパネル設定', 0x9b59b6, gachaFields);
+        const gachaFields = [
+          ...db.getGachaPanels(guild.id).map((panel) => ({
+            name: `旧ガチャ: ${panel.panel_key}`,
+            value: `設置先: ${ch(panel.channel_id)}\nメッセージID: ${panel.message_id || none}\nタイトル: ${panel.title || none}`,
+            inline: true,
+          })),
+          ...db.getBoxGachaSettings(guild.id).map((gacha) => ({
+            name: `ガチャ: ${gacha.gacha_key}`,
+            value: [
+              `ガチャ名: ${gacha.name || none}`,
+              `設置先: ${ch(gacha.channel_id)}`,
+              `メッセージID: ${gacha.message_id || none}`,
+              `ログ先: ${ch(gacha.log_channel_id)}`,
+              `価格: 1回 ${gacha.single_price ?? 0} / 10連 ${gacha.ten_price ?? 0}`,
+            ].join('\n'),
+            inline: true,
+          })),
+        ];
+        if (gachaFields.length > 0) {
+          addDetailEmbeds('🎰 ガチャパネル設定', 0x9b59b6, gachaFields);
+        }
       }
 
       const embedsBySection = {
@@ -4203,7 +4218,6 @@ client.on('interactionCreate', async interaction => {
         economy: [economyEmbed, ...economyDetailEmbeds],
         security: [secEmbed],
       };
-      const section = commandName.replace('設定状況', '');
       await interaction.editReply({ embeds: embedsBySection[section] });
       return;
     }
