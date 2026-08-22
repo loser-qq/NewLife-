@@ -20,6 +20,9 @@ try {
   }
 }
 
+const fs = require('fs');
+const path = require('path');
+
 process.on('uncaughtException', (err) => {
   process.stdout.write('[FATAL] uncaughtException: ' + err.message + '\n' + err.stack + '\n');
   process.exit(1);
@@ -68,14 +71,22 @@ function requireCommunityDb() {
 const communityDb = requireCommunityDb();
 
 function requireGachaModule(moduleName) {
-  try {
-    return require(`./data/${moduleName}`);
-  } catch (error) {
-    if (error && error.code !== 'MODULE_NOT_FOUND') {
-      throw error;
+  const candidatePaths = [
+    path.join(__dirname, 'data', moduleName),
+    path.join(__dirname, 'features', 'economy', 'data', moduleName),
+    path.join(process.cwd(), 'features', 'economy', 'data', moduleName),
+    path.join(process.cwd(), 'data', moduleName),
+    path.join(__dirname, moduleName),
+    path.join(process.cwd(), moduleName),
+  ];
+
+  for (const filePath of candidatePaths) {
+    if (fs.existsSync(filePath)) {
+      return require(filePath);
     }
-    return require(`./${moduleName}`);
   }
+
+  throw new Error(`gacha module not found: ${moduleName}`);
 }
 
 const { gachaCommandBuilders, isGachaCommandName, handleGachaCommand } = requireGachaModule('gacha.js');
