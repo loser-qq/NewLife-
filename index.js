@@ -53,7 +53,19 @@ const {
 } = require('discord.js');
 
 const db = require('./database.js');
-const communityDb = require('../community/database.js');
+
+function requireCommunityDb() {
+  try {
+    return require('../community/database.js');
+  } catch (error) {
+    if (error && error.code !== 'MODULE_NOT_FOUND') {
+      throw error;
+    }
+    return require('./features/community/database.js');
+  }
+}
+
+const communityDb = requireCommunityDb();
 
 function requireGachaModule(moduleName) {
   try {
