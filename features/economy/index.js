@@ -1250,6 +1250,151 @@ async function processVcVendingExpirations() {
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const DEFAULT_EVALUATION_CHECKIN_MESSAGE = [
+  '{user} さん、こんにちは。',
+  '**{guild}** の仮メンバー評価期間について中間確認のご連絡です。',
+  '',
+  '評価期限: {deadline}（残り約 {remaining_days} 日）',
+  '',
+  'このまま仮メンバーとして評価を継続するか、ここで評価を終了するかを下のボタンから選んでください。',
+  '選択しなかった場合は、そのまま仮メンバーとして評価を継続します。',
+].join('\n');
+
+function renderEvaluationCheckinMessage(template, context) {
+  return String(template)
+    .replaceAll('{user}', `<@${context.userId}>`)
+    .replaceAll('{name}', context.displayName)
+    .replaceAll('{guild}', context.guildName)
+    .replaceAll('{deadline}', formatDateTime(context.deadlineAt))
+    .replaceAll('{remaining_days}', String(context.remainingDays))
+    .replaceAll('{days}', String(context.evaluationDays))
+    .replaceAll('{checkin_days}', String(context.checkinDays))
+    .slice(0, 1900);
+}
+
+function buildEvaluationCheckinRow(guildId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`eval_checkin:continue:${guildId}`)
+      .setLabel('仮メンバーを続ける')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId(`eval_checkin:stop:${guildId}`)
+      .setLabel('評価を終了する')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled),
+  );
+}
+
+async function processEvaluationCheckins() {
+  const now = Date.now();
+
+  for (const row of db.getPendingEvaluationCheckins()) {
+    const guild = client.guilds.cache.get(row.guild_id);
+    if (!guild) continue;
+
+    const settings = db.getSettings(guild.id);
+    const checkinDays = Math.max(0, Math.floor(Number(settings.evaluation_checkin_days || 0)));
+    const evaluationDays = Math.max(0, Math.floor(Number(settings.evaluation_days || 0)));
+    const evaluationRoleId = settings.evaluation_role_id || null;
+    if (checkinDays <= 0 || evaluationDays <= 0 || !evaluationRoleId) continue;
+
+    const periodStartAt = getNextDayStartAtJst(row.passed_at);
+    if (now < periodStartAt + (checkinDays * DAY_MS)) continue;
+
+    const member = await guild.members.fetch(row.user_id).catch(() => null);
+    if (!member || !member.roles.cache.has(evaluationRoleId)) {
+      db.markEvaluationCheckinNotified(row.user_id, guild.id, now);
+      continue;
+    }
+
+    const deadlineAt = periodStartAt + (evaluationDays * DAY_MS);
+    const content = renderEvaluationCheckinMessage(settings.evaluation_checkin_message || DEFAULT_EVALUATION_CHECKIN_MESSAGE, {
+      userId: member.id,
+      displayName: member.displayName,
+      guildName: guild.name,
+      deadlineAt,
+      remainingDays: Math.max(0, Math.ceil((deadlineAt - now) / DAY_MS)),
+      evaluationDays,
+      checkinDays,
+    });
+
+    const sent = await member.send({ content, components: [buildEvaluationCheckinRow(guild.id)] }).catch(() => null);
+    db.markEvaluationCheckinNotified(row.user_id, guild.id, now);
+
+    if (!sent) {
+      await sendToConfiguredChannel(guild, settings.interview_log_channel_id, {
+        content: `⚠️ <@${member.id}> へ仮メンバー中間確認のDMを送信できませんでした（DM拒否の可能性）。`,
+      }).catch(() => null);
+    }
+  }
+}
+
+async function handleEvaluationCheckinButton(interaction) {
+  const [, choice, guildId] = interaction.customId.split(':');
+  if (choice !== 'continue' && choice !== 'stop') return;
+
+  const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+  if (!guild) {
+    await interaction.reply({ content: '❌ 対象サーバーが見つかりませんでした。' }).catch(() => null);
+    return;
+  }
+
+  const evaluation = db.getInterviewEvaluation(interaction.user.id, guild.id);
+  if (!evaluation) {
+    await interaction.reply({ content: '❌ 評価情報が見つかりませんでした。サーバーの担当者にお問い合わせください。' }).catch(() => null);
+    return;
+  }
+
+  if (evaluation.checkin_choice) {
+    await interaction.update({ components: [buildEvaluationCheckinRow(guild.id, true)] }).catch(() => null);
+    await interaction.followUp({ content: 'すでに選択済みです。変更が必要な場合はサーバーの担当者にお問い合わせください。' }).catch(() => null);
+    return;
+  }
+
+  const settings = db.getSettings(guild.id);
+  const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!member) {
+    await interaction.reply({ content: '❌ サーバー内でメンバー情報を確認できませんでした。' }).catch(() => null);
+    return;
+  }
+
+  let resultText;
+  if (choice === 'continue') {
+    resultText = '✅ 引き続き仮メンバーとして評価を継続します。';
+  } else {
+    const stopRoleId = settings.evaluation_stop_role_id || null;
+    if (!stopRoleId) {
+      await interaction.reply({ content: '❌ 評価終了時に付与するロールが未設定のため処理できません。サーバーの担当者にお問い合わせください。' }).catch(() => null);
+      return;
+    }
+    await member.roles.add(stopRoleId);
+    if (settings.evaluation_role_id && member.roles.cache.has(settings.evaluation_role_id)) {
+      await member.roles.remove(settings.evaluation_role_id).catch(() => null);
+    }
+    resultText = '✅ 評価を終了しました。ロールを変更しています。';
+  }
+
+  db.setEvaluationCheckinChoice(interaction.user.id, guild.id, choice, Date.now());
+
+  await interaction.update({ components: [buildEvaluationCheckinRow(guild.id, true)] }).catch(() => null);
+  await interaction.followUp({ content: resultText }).catch(() => null);
+
+  await sendToConfiguredChannel(guild, settings.interview_log_channel_id, {
+    embeds: [new EmbedBuilder()
+      .setTitle('📝 仮メンバー中間確認の回答')
+      .setColor(choice === 'continue' ? 0x57f287 : 0x99aab5)
+      .addFields(
+        { name: 'ユーザー', value: `<@${member.id}>`, inline: true },
+        { name: '選択', value: choice === 'continue' ? '仮メンバーを続ける' : '評価を終了する', inline: true },
+      )
+      .setTimestamp()],
+  }).catch(() => null);
+}
+
 async function grantRoleSalary(guild, roleId, amount) {
   const role = guild.roles.cache.get(roleId);
   if (!role) {
@@ -1701,6 +1846,18 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addIntegerOption(opt => opt.setName('日数').setDescription('面接通過日からの評価期限日数').setRequired(true).setMinValue(0))
     .addRoleOption(opt => opt.setName('対象ロール').setDescription('評価期限を表示する対象ロール').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('仮メンバー確認設定')
+    .setDescription('[管理者] 仮メンバーへ中間確認DMを送る日数と評価終了時ロールを設定します')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(opt => opt.setName('日数').setDescription('評価開始からDMを送るまでの日数（0で無効）').setRequired(true).setMinValue(0))
+    .addRoleOption(opt => opt.setName('評価終了ロール').setDescription('「評価を終了する」を選んだ場合に付与するロール').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('仮メンバー確認文設定')
+    .setDescription('[管理者] 仮メンバーへ送る中間確認DMの本文を設定します')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName('ロール表示除外設定')
@@ -2231,9 +2388,11 @@ client.once('ready', async (c) => {
   await processRoleVoiceTimeRewards().catch(error => console.error('ロール別VC時間報酬エラー:', error));
   await processVendingExpirations().catch(error => console.error('自販機期限処理エラー:', error));
   await processVcVendingExpirations().catch(error => console.error('VC自販機期限処理エラー:', error));
+  await processEvaluationCheckins().catch(error => console.error('仮メンバー中間確認エラー:', error));
   const interval = setInterval(() => {
     processActiveLevelingSessions().catch(error => console.error('レベリング定期同期エラー:', error));
     processRoleVoiceTimeRewards().catch(error => console.error('ロール別VC時間報酬エラー:', error));
+    processEvaluationCheckins().catch(error => console.error('仮メンバー中間確認エラー:', error));
   }, 5 * 60 * 1000);
   interval.unref();
 
@@ -2319,6 +2478,21 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 });
 
 client.on('interactionCreate', async interaction => {
+  if (interaction.isButton() && interaction.customId.startsWith('eval_checkin:')) {
+    try {
+      await handleEvaluationCheckinButton(interaction);
+    } catch (error) {
+      console.error('仮メンバー中間確認ボタンエラー:', error);
+      const payload = { content: '❌ 処理中にエラーが発生しました。サーバーの担当者にお問い合わせください。' };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp(payload).catch(() => null);
+      } else {
+        await interaction.reply(payload).catch(() => null);
+      }
+    }
+    return;
+  }
+
   if (!interaction.guild) return;
 
   try {
@@ -2947,6 +3121,13 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (interaction.isModalSubmit() && interaction.customId === 'eval_checkin_message_modal') {
+      const message = interaction.fields.getTextInputValue('message').trim();
+      db.setEvaluationCheckinMessage(interaction.guild.id, message);
+      await interaction.reply({ content: '✅ 仮メンバー中間確認DMの本文を更新しました。', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName, guild, member } = interaction;
@@ -3460,6 +3641,40 @@ client.on('interactionCreate', async interaction => {
         content: `✅ 評価期限設定を更新しました。\n評価期限: **${days}日**\n対象ロール: <@&${role.id}>`,
         flags: MessageFlags.Ephemeral,
       });
+      return;
+    }
+
+    if (commandName === '仮メンバー確認設定') {
+      const days = interaction.options.getInteger('日数', true);
+      const stopRole = interaction.options.getRole('評価終了ロール', false);
+      db.setEvaluationCheckinSettings(guild.id, days, stopRole ? stopRole.id : null);
+      await interaction.reply({
+        content: days > 0
+          ? `✅ 仮メンバー中間確認を設定しました。\n送信タイミング: 評価開始から **${days}日後**\n評価終了ロール: ${stopRole ? `<@&${stopRole.id}>` : '未設定'}`
+          : '✅ 仮メンバー中間確認DMを無効にしました。',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    if (commandName === '仮メンバー確認文設定') {
+      const current = db.getSettings(guild.id).evaluation_checkin_message || DEFAULT_EVALUATION_CHECKIN_MESSAGE;
+      const modal = new ModalBuilder()
+        .setCustomId('eval_checkin_message_modal')
+        .setTitle('仮メンバー中間確認DM本文')
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('message')
+              .setLabel('本文')
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+              .setMaxLength(1800)
+              .setPlaceholder('{user} {name} {guild} {deadline} {remaining_days} {days} {checkin_days} が使えます')
+              .setValue(current),
+          ),
+        );
+      await interaction.showModal(modal);
       return;
     }
 

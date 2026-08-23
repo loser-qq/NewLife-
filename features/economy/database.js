@@ -45,6 +45,9 @@ db.exec(`
     add_role_id TEXT,
     evaluation_days INTEGER DEFAULT 0,
     evaluation_role_id TEXT,
+    evaluation_checkin_days INTEGER DEFAULT 0,
+    evaluation_stop_role_id TEXT,
+    evaluation_checkin_message TEXT,
     role_display_exclude_id TEXT,
     role_display_include1_id TEXT,
     role_display_include2_id TEXT,
@@ -137,6 +140,9 @@ db.exec(`
     user_id TEXT NOT NULL,
     guild_id TEXT NOT NULL,
     passed_at INTEGER NOT NULL,
+    checkin_notified_at INTEGER,
+    checkin_choice TEXT,
+    checkin_decided_at INTEGER,
     PRIMARY KEY (user_id, guild_id)
   );
 
@@ -506,6 +512,26 @@ if (!settingsColumns.includes('role_display_include2_id')) {
 if (!settingsColumns.includes('role_display_include3_id')) {
   db.prepare('ALTER TABLE settings ADD COLUMN role_display_include3_id TEXT').run();
 }
+if (!settingsColumns.includes('evaluation_checkin_days')) {
+  db.prepare('ALTER TABLE settings ADD COLUMN evaluation_checkin_days INTEGER DEFAULT 0').run();
+}
+if (!settingsColumns.includes('evaluation_stop_role_id')) {
+  db.prepare('ALTER TABLE settings ADD COLUMN evaluation_stop_role_id TEXT').run();
+}
+if (!settingsColumns.includes('evaluation_checkin_message')) {
+  db.prepare('ALTER TABLE settings ADD COLUMN evaluation_checkin_message TEXT').run();
+}
+
+const interviewEvaluationColumns = db.prepare('PRAGMA table_info(interview_evaluations)').all().map(row => row.name);
+if (!interviewEvaluationColumns.includes('checkin_notified_at')) {
+  db.prepare('ALTER TABLE interview_evaluations ADD COLUMN checkin_notified_at INTEGER').run();
+}
+if (!interviewEvaluationColumns.includes('checkin_choice')) {
+  db.prepare('ALTER TABLE interview_evaluations ADD COLUMN checkin_choice TEXT').run();
+}
+if (!interviewEvaluationColumns.includes('checkin_decided_at')) {
+  db.prepare('ALTER TABLE interview_evaluations ADD COLUMN checkin_decided_at INTEGER').run();
+}
 
 const gachaProductColumns = db.prepare('PRAGMA table_info(gacha_products)').all().map(row => row.name);
 if (!gachaProductColumns.includes('ten_pull_price')) {
@@ -673,6 +699,26 @@ function setEvaluationSettings(guildId, evaluationDays, evaluationRoleId) {
   `).run(guildId, days, evaluationRoleId || null);
 }
 
+function setEvaluationCheckinSettings(guildId, checkinDays, stopRoleId) {
+  const days = Math.max(0, Math.floor(checkinDays));
+  db.prepare(`
+    INSERT INTO settings (guild_id, evaluation_checkin_days, evaluation_stop_role_id)
+    VALUES (?, ?, ?)
+    ON CONFLICT(guild_id) DO UPDATE SET
+      evaluation_checkin_days = excluded.evaluation_checkin_days,
+      evaluation_stop_role_id = excluded.evaluation_stop_role_id
+  `).run(guildId, days, stopRoleId || null);
+}
+
+function setEvaluationCheckinMessage(guildId, message) {
+  const text = String(message || '').trim() || null;
+  db.prepare(`
+    INSERT INTO settings (guild_id, evaluation_checkin_message)
+    VALUES (?, ?)
+    ON CONFLICT(guild_id) DO UPDATE SET evaluation_checkin_message = excluded.evaluation_checkin_message
+  `).run(guildId, text);
+}
+
 function setRoleDisplayExcludeRole(guildId, roleId) {
   db.prepare(`
     INSERT INTO settings (guild_id, role_display_exclude_id)
@@ -782,12 +828,30 @@ function setInterviewEvaluationPassedAt(userId, guildId, passedAt) {
   const ts = Math.max(0, Math.floor(passedAt));
   db.prepare(`
     INSERT INTO interview_evaluations (user_id, guild_id, passed_at) VALUES (?, ?, ?)
-    ON CONFLICT(user_id, guild_id) DO UPDATE SET passed_at = excluded.passed_at
+    ON CONFLICT(user_id, guild_id) DO UPDATE SET
+      passed_at = excluded.passed_at,
+      checkin_notified_at = NULL,
+      checkin_choice = NULL,
+      checkin_decided_at = NULL
   `).run(userId, guildId, ts);
 }
 
 function getInterviewEvaluation(userId, guildId) {
-  return db.prepare('SELECT passed_at FROM interview_evaluations WHERE user_id = ? AND guild_id = ?').get(userId, guildId) || null;
+  return db.prepare('SELECT * FROM interview_evaluations WHERE user_id = ? AND guild_id = ?').get(userId, guildId) || null;
+}
+
+function getPendingEvaluationCheckins() {
+  return db.prepare('SELECT user_id, guild_id, passed_at FROM interview_evaluations WHERE checkin_notified_at IS NULL').all();
+}
+
+function markEvaluationCheckinNotified(userId, guildId, notifiedAt) {
+  return db.prepare('UPDATE interview_evaluations SET checkin_notified_at = ? WHERE user_id = ? AND guild_id = ?')
+    .run(Math.max(0, Math.floor(notifiedAt)), userId, guildId).changes;
+}
+
+function setEvaluationCheckinChoice(userId, guildId, choice, decidedAt) {
+  return db.prepare('UPDATE interview_evaluations SET checkin_choice = ?, checkin_decided_at = ? WHERE user_id = ? AND guild_id = ?')
+    .run(choice, Math.max(0, Math.floor(decidedAt)), userId, guildId).changes;
 }
 
 function deleteInterviewEvaluation(userId, guildId) {
@@ -1708,6 +1772,8 @@ module.exports = {
   setLevelingVoiceChannel,
   setInterviewSettings,
   setEvaluationSettings,
+  setEvaluationCheckinSettings,
+  setEvaluationCheckinMessage,
   setRoleDisplayExcludeRole,
   setRoleDisplayIncludeRoles,
   addPermittedRole,
@@ -1727,6 +1793,9 @@ module.exports = {
   setLevelingLastLevel,
   setInterviewEvaluationPassedAt,
   getInterviewEvaluation,
+  getPendingEvaluationCheckins,
+  markEvaluationCheckinNotified,
+  setEvaluationCheckinChoice,
   deleteInterviewEvaluation,
   resetAllInterviewEvaluations,
   getInterviewEvaluations,
