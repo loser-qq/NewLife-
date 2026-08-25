@@ -312,6 +312,7 @@ function buildVcControlPanelRows() {
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('vc_panel_hide').setLabel('非表示').setStyle(ButtonStyle.Secondary).setEmoji('🙈'),
     new ButtonBuilder().setCustomId('vc_panel_show').setLabel('表示').setStyle(ButtonStyle.Secondary).setEmoji('👀'),
+    new ButtonBuilder().setCustomId('vc_panel_add_user').setLabel('ユーザー追加').setStyle(ButtonStyle.Secondary).setEmoji('➕'),
     new ButtonBuilder().setCustomId('vc_panel_delete').setLabel('削除').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
   );
 
@@ -365,6 +366,33 @@ function parseRoleIdList(raw) {
     return parsed.filter((id) => typeof id === 'string' && id.length > 0);
   } catch (_) {
     return [];
+  }
+}
+
+function parseDiscordUserId(raw) {
+  const value = String(raw || '').trim();
+  const mentionMatch = value.match(/^<@!?(\d{17,20})>$/);
+  if (mentionMatch) return mentionMatch[1];
+  if (/^\d{17,20}$/.test(value)) return value;
+  return null;
+}
+
+async function setChildVcVisibility(guild, channel, child, visible) {
+  const transfer = db.getVcTransferByParent(guild.id, child.parent_vc_id);
+  const visibleRoleIds = parseRoleIdList(transfer?.visible_role_ids);
+  const connectRoleIds = parseRoleIdList(transfer?.connect_role_ids);
+  const visibleRoleIdSet = new Set(visibleRoleIds);
+  const roleIds = [...new Set([...visibleRoleIds, ...connectRoleIds])];
+
+  await channel.permissionOverwrites.edit(guild.id, {
+    ViewChannel: visible ? (visibleRoleIds.length > 0 ? false : null) : false,
+  });
+
+  for (const roleId of roleIds) {
+    if (!guild.roles.cache.has(roleId)) continue;
+    await channel.permissionOverwrites.edit(roleId, {
+      ViewChannel: visible ? (visibleRoleIdSet.has(roleId) ? true : null) : false,
+    });
   }
 }
 
@@ -1300,6 +1328,23 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (action === 'add_user') {
+        if (!canEditPermissions) {
+          await interaction.reply({ content: '❌ 権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        const modal = new ModalBuilder().setCustomId(`vc_modal_adduser_${channel.id}`).setTitle('VCにユーザーを追加');
+        const userInput = new TextInputBuilder()
+          .setCustomId('vc_user')
+          .setLabel('追加するユーザーのメンションまたはID')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(40);
+        modal.addComponents(new ActionRowBuilder().addComponents(userInput));
+        await interaction.showModal(modal);
+        return;
+      }
+
       if (action === 'lock') {
         if (!canLock) {
           await interaction.reply({ content: '❌ ロック権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
@@ -1325,7 +1370,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: '❌ 非表示権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
           return;
         }
-        await channel.permissionOverwrites.edit(interaction.guild.id, { ViewChannel: false });
+        await setChildVcVisibility(interaction.guild, channel, child, false);
         await interaction.reply({ content: '✅ VCを非表示にしました。', flags: MessageFlags.Ephemeral });
         return;
       }
@@ -1335,7 +1380,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: '❌ 表示権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
           return;
         }
-        await channel.permissionOverwrites.edit(interaction.guild.id, { ViewChannel: null });
+        await setChildVcVisibility(interaction.guild, channel, child, true);
         await interaction.reply({ content: '✅ VCを表示状態に戻しました。', flags: MessageFlags.Ephemeral });
         return;
       }
@@ -1407,6 +1452,34 @@ client.on('interactionCreate', async (interaction) => {
 
         await channel.setUserLimit(limit);
         await interaction.reply({ content: `✅ 人数上限を **${limit}** に変更しました。`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (modalType === 'adduser') {
+        if (!canEditVcPermissions(interaction.member, child)) {
+          await interaction.reply({ content: '❌ 権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        const raw = interaction.fields.getTextInputValue('vc_user').trim();
+        const userId = parseDiscordUserId(raw);
+        if (!userId) {
+          await interaction.reply({ content: '❌ ユーザーのメンションまたはIDを入力してください。', flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        const targetMember = await interaction.guild.members.fetch(userId).catch(() => null);
+        if (!targetMember) {
+          await interaction.reply({ content: '❌ そのユーザーがサーバー内に見つかりません。', flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        await channel.permissionOverwrites.edit(targetMember.id, {
+          ViewChannel: true,
+          Connect: true,
+          Speak: true,
+        });
+        await interaction.reply({ content: `✅ <@${targetMember.id}> をVCに追加しました。`, flags: MessageFlags.Ephemeral });
         return;
       }
     }
