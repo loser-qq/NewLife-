@@ -236,55 +236,40 @@ function saveConfig() {
 }
 
 function resetBotSettings(guildId) {
-  const settingTables = [
-    'settings',
-    'permitted_roles',
-    'vc_transfer_settings',
-    'child_vcs',
-    'ticket_panels',
-    'tickets',
-    'inquiry_forum_settings',
-    'inquiry_forum_items',
-    'inquiry_forum_tickets',
-    'reaction_role_messages',
-    'reaction_role_mappings',
-    'pinned_messages',
-    'leveling_thresholds',
-    'leveling_roles',
-    'role_voice_time_channels',
-    'role_voice_time_periods',
-    'role_voice_time_rewards',
-    'role_voice_time_reward_claims',
-    'role_voice_time_reward_rules',
-    'role_voice_time_reward_rule_claims',
-    'role_voice_time_sessions',
-    'role_salary_settings',
-    'vending_panels',
-    'vending_products',
-    'vending_panels_multi',
-    'vending_products_multi',
-    'vc_vending_panels_multi',
-    'vc_vending_products_multi',
-    'gacha_panels',
-    'gacha_products',
-    'box_gachas',
-    'box_gacha_products',
-    'box_gacha_panels',
-    'box_gacha_log_channels',
-    'box_gacha_next_products',
-    'bank_transfer_roles',
-    'currency_support_roles',
-    'bank_panels',
-  ];
-  const existingTables = new Set(
-    unifiedDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name),
-  );
+  const settingTables = unifiedDb
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+    .all()
+    .map((row) => row.name)
+    .filter((name) => name !== 'app_state');
+
+  const quoteIdentifier = (identifier) => `"${String(identifier).replace(/"/g, '""')}"`;
+  const deleteStatements = {
+    role_voice_time_reward_rule_claims: unifiedDb.prepare(`
+      DELETE FROM role_voice_time_reward_rule_claims
+      WHERE reward_rule_id IN (
+        SELECT id FROM role_voice_time_reward_rules WHERE guild_id = ?
+      )
+    `),
+  };
+  const tableHasGuildId = new Map();
   let deletedCount = 0;
 
   unifiedDb.transaction(() => {
     for (const table of settingTables) {
-      if (!existingTables.has(table)) continue;
-      deletedCount += unifiedDb.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(guildId).changes;
+      if (deleteStatements[table]) {
+        deletedCount += deleteStatements[table].run(guildId).changes;
+        continue;
+      }
+
+      let hasGuildId = tableHasGuildId.get(table);
+      if (hasGuildId === undefined) {
+        const columns = unifiedDb.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all();
+        hasGuildId = columns.some((column) => column.name === 'guild_id');
+        tableHasGuildId.set(table, hasGuildId);
+      }
+
+      if (!hasGuildId) continue;
+      deletedCount += unifiedDb.prepare(`DELETE FROM ${quoteIdentifier(table)} WHERE guild_id = ?`).run(guildId).changes;
     }
     unifiedDb.prepare('DELETE FROM app_state WHERE namespace = ? AND state_key = ?').run('security', 'config');
   })();
@@ -927,7 +912,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const deletedCount = resetBotSettings(interaction.guild.id);
     await interaction.reply({
-      content: `ボット設定を初期値へ戻しました。削除した設定: ${deletedCount}件。チケット、VC転送、面接、評価、ログ、レベリング、自販機、ガチャ、銀行、リアクションロールの設定を含みます。残高、面接通過履歴、購入履歴、Discord上の投稿・チャンネル・ロールは変更していません。`,
+      content: `ボット設定リセットを実行しました。サーバーIDに紐づくDBデータを削除: ${deletedCount}件。Discord上の投稿・チャンネル・ロールなど、DB外の実体は変更していません。`,
       ephemeral: true,
     });
     return;

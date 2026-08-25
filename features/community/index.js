@@ -29,6 +29,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   AttachmentBuilder,
@@ -369,12 +370,16 @@ function parseRoleIdList(raw) {
   }
 }
 
-function parseDiscordUserId(raw) {
-  const value = String(raw || '').trim();
-  const mentionMatch = value.match(/^<@!?(\d{17,20})>$/);
-  if (mentionMatch) return mentionMatch[1];
-  if (/^\d{17,20}$/.test(value)) return value;
-  return null;
+function buildVcPanelAddUserSelectComponents(channelId, actorId) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(`vc_panel_add_user_select:${channelId}:${actorId}`)
+        .setPlaceholder('VCに追加するユーザーを選択')
+        .setMinValues(1)
+        .setMaxValues(5),
+    ),
+  ];
 }
 
 async function setChildVcVisibility(guild, channel, child, visible) {
@@ -1333,15 +1338,11 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: '❌ 権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
           return;
         }
-        const modal = new ModalBuilder().setCustomId(`vc_modal_adduser_${channel.id}`).setTitle('VCにユーザーを追加');
-        const userInput = new TextInputBuilder()
-          .setCustomId('vc_user')
-          .setLabel('追加するユーザーのメンションまたはID')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(40);
-        modal.addComponents(new ActionRowBuilder().addComponents(userInput));
-        await interaction.showModal(modal);
+        await interaction.reply({
+          content: '追加するユーザーを選択してください。',
+          components: buildVcPanelAddUserSelectComponents(channel.id, interaction.user.id),
+          flags: MessageFlags.Ephemeral,
+        });
         return;
       }
 
@@ -1454,34 +1455,60 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `✅ 人数上限を **${limit}** に変更しました。`, flags: MessageFlags.Ephemeral });
         return;
       }
+    }
 
-      if (modalType === 'adduser') {
-        if (!canEditVcPermissions(interaction.member, child)) {
-          await interaction.reply({ content: '❌ 権限ロールを持っている人だけできます。', flags: MessageFlags.Ephemeral });
-          return;
-        }
+    if (interaction.isUserSelectMenu() && interaction.customId.startsWith('vc_panel_add_user_select:')) {
+      const [prefix, channelId, actorId] = interaction.customId.split(':');
+      if (prefix !== 'vc_panel_add_user_select') return;
 
-        const raw = interaction.fields.getTextInputValue('vc_user').trim();
-        const userId = parseDiscordUserId(raw);
-        if (!userId) {
-          await interaction.reply({ content: '❌ ユーザーのメンションまたはIDを入力してください。', flags: MessageFlags.Ephemeral });
-          return;
-        }
+      const child = db.getChildVc(guildId, channelId);
+      if (!child) {
+        await interaction.update({ content: '❌ このVCは既に削除されたか、管理対象外です。', components: [] });
+        return;
+      }
 
-        const targetMember = await interaction.guild.members.fetch(userId).catch(() => null);
-        if (!targetMember) {
-          await interaction.reply({ content: '❌ そのユーザーがサーバー内に見つかりません。', flags: MessageFlags.Ephemeral });
-          return;
-        }
+      if (interaction.user.id !== actorId) {
+        await interaction.update({ content: '❌ この選択UIを開いたユーザーのみ操作できます。', components: [] });
+        return;
+      }
+
+      if (child.owner_id !== interaction.user.id) {
+        await interaction.update({ content: '❌ このVCのオーナーのみ操作できます。', components: [] });
+        return;
+      }
+
+      if (!canEditVcPermissions(interaction.member, child)) {
+        await interaction.update({ content: '❌ 権限ロールを持っている人だけできます。', components: [] });
+        return;
+      }
+
+      const channel = interaction.guild.channels.cache.get(channelId);
+      if (!channel || channel.type !== ChannelType.GuildVoice) {
+        await interaction.update({ content: '❌ VCチャンネルが見つかりません。', components: [] });
+        return;
+      }
+
+      const addedMentions = [];
+      for (const userId of interaction.values) {
+        const targetMember = interaction.guild.members.cache.get(userId)
+          || await interaction.guild.members.fetch(userId).catch(() => null);
+        if (!targetMember || targetMember.user.bot) continue;
 
         await channel.permissionOverwrites.edit(targetMember.id, {
           ViewChannel: true,
           Connect: true,
           Speak: true,
-        });
-        await interaction.reply({ content: `✅ <@${targetMember.id}> をVCに追加しました。`, flags: MessageFlags.Ephemeral });
-        return;
+        }).catch(() => null);
+        addedMentions.push(`<@${targetMember.id}>`);
       }
+
+      await interaction.update({
+        content: addedMentions.length > 0
+          ? `✅ 追加しました: ${addedMentions.join(' ')}`
+          : 'ℹ️ 追加できるユーザーが選択されていませんでした。',
+        components: [],
+      });
+      return;
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('ticket_open_')) {
